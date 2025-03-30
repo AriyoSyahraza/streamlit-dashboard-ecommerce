@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
+import plotly.express as px
+import requests
 
 # Load data gabungan
 @st.cache_data
 def load_data():
-    df = pd.read_csv('dataset/cleaned_ecommerce_data.csv')
+    df = pd.read_csv('dataset/combined_dashboard_dataset.csv')
     df['order_purchase_timestamp'] = pd.to_datetime(df['order_purchase_timestamp'])
     return df
 
@@ -18,7 +20,8 @@ st.markdown("Menampilkan analisis dari transaksi dan metode pembayaran berdasark
 # Sidebar navigasi
 option = st.sidebar.selectbox("Pilih Analisis", 
                               ("Pertanyaan 1: Tren Bulanan", 
-                               "Pertanyaan 2: Metode Pembayaran"))
+                               "Pertanyaan 2: Metode Pembayaran",
+                               "Pertanyaan 3: RFM per State"))
 
 # === PERTANYAAN 1 ===
 if option == "Pertanyaan 1: Tren Bulanan":
@@ -77,3 +80,45 @@ elif option == "Pertanyaan 2: Metode Pembayaran":
     ax[1].tick_params(axis='x', rotation=45)
 
     st.pyplot(fig)
+
+elif option == "Pertanyaan 3: RFM per State":
+    st.markdown("### Visualisasi Total RFM per State (Brazil)")
+
+    # Hitung ulang RFM berdasarkan customer_id
+    df['order_purchase_timestamp'] = pd.to_datetime(df['order_purchase_timestamp'])
+    latest_date = df['order_purchase_timestamp'].max()
+
+    rfm = df.groupby('customer_state').agg({
+        'order_purchase_timestamp': lambda x: (latest_date - x.max()).days,
+        'order_id': 'nunique',
+        'price': 'sum'
+    }).reset_index()
+    rfm.columns = ['customer_state', 'Recency', 'Frequency', 'Monetary']
+
+    # Load GeoJSON
+    @st.cache_data
+    def load_geojson():
+        url = 'https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/brazil-states.geojson'
+        return requests.get(url).json()
+
+    geojson = load_geojson()
+
+    # Pilihan metrik
+    metric = st.selectbox("Pilih metrik yang ingin divisualisasikan:", ['Recency', 'Frequency', 'Monetary'])
+
+    # Plot peta interaktif
+    fig = px.choropleth(
+        rfm,
+        geojson=geojson,
+        locations='customer_state',
+        color=metric,
+        featureidkey='properties.sigla',
+        hover_name='customer_state',
+        hover_data={'Recency': True, 'Frequency': True, 'Monetary': True},
+        color_continuous_scale='Blues',
+        title=f'Total {metric} per State di Brazil'
+    )
+    fig.update_geos(fitbounds="locations", visible=False)
+    fig.update_layout(margin={"r":0,"t":50,"l":0,"b":0})
+
+    st.plotly_chart(fig, use_container_width=True)
