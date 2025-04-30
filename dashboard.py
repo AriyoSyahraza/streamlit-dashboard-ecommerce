@@ -1,158 +1,220 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
 import plotly.express as px
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.ticker import MultipleLocator
+import json
 import requests
 
-# Load orders data
+# Load data
 @st.cache_data
-def load_orders_data():
-    df = pd.read_csv("dataset/orders_merged.csv")
-    df["order_purchase_timestamp"] = pd.to_datetime(df["order_purchase_timestamp"])
-    return df
+def load_data():
+    combined = pd.read_csv('dataset/combined_dataset.csv', parse_dates=['order_purchase_timestamp'])
+    payments = pd.read_csv('dataset/payment_clean.csv')
+    return combined, payments
 
-# Load payments data
+combined, payments = load_data()
+
 @st.cache_data
-def load_payment_data():
-    df = pd.read_csv("dataset/payment_clean.csv")
-    return df
+def load_brazil_geojson():
+    url = 'https://raw.githubusercontent.com/codeforamerica/click_that_hood/master/public/data/brazil-states.geojson'
+    response = requests.get(url)
+    return response.json()
 
-orders_df = load_orders_data()
-payments_df = load_payment_data()
+brazil_geojson = load_brazil_geojson()
 
-st.title("📊 E-Commerce Dashboard")
 
-option = st.sidebar.selectbox("Pilih Analisis", [
-    "Pertanyaan 1: Tren Bulanan",
-    "Pertanyaan 2: Metode Pembayaran",
-    "Pertanyaan 3: RFM per Kota/Provinsi"
-])
+# Mapping kode state ke nama lengkap state
+state_mapping = {
+    "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas", "BA": "Bahia",
+    "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo", "GO": "Goiás", "MA": "Maranhão",
+    "MT": "Mato Grosso", "MS": "Mato Grosso do Sul", "MG": "Minas Gerais", "PA": "Pará", "PB": "Paraíba",
+    "PR": "Paraná", "PE": "Pernambuco", "PI": "Piauí", "RJ": "Rio de Janeiro", "RN": "Rio Grande do Norte",
+    "RS": "Rio Grande do Sul", "RO": "Rondônia", "RR": "Roraima", "SC": "Santa Catarina", "SP": "São Paulo",
+    "SE": "Sergipe", "TO": "Tocantins"
+}
 
-# --- PERTANYAAN 1 ---
-if option == "Pertanyaan 1: Tren Bulanan":
-    orders_df['order_month'] = orders_df['order_purchase_timestamp'].dt.to_period('M')
-    orders_df['year'] = orders_df['order_purchase_timestamp'].dt.year
-    orders_df['month'] = orders_df['order_purchase_timestamp'].dt.month
+combined['year'] = combined['order_purchase_timestamp'].dt.year
+combined['month'] = combined['order_purchase_timestamp'].dt.month
+combined['customer_state_full'] = combined['customer_state'].map(state_mapping)
+combined['product_category_name_english'] = combined['product_category_name_english'].str.replace('_', ' ')
 
-    monthly_summary = orders_df.groupby('order_month').agg({
-        'order_id': 'nunique',
-        'total_revenue': 'sum'
-    }).reset_index().rename(columns={'order_id': 'total_orders'})
+def get_quarter(month):
+    if month in [1, 2, 3]: return "Q1"
+    elif month in [4, 5, 6]: return "Q2"
+    elif month in [7, 8, 9]: return "Q3"
+    else: return "Q4"
 
-    monthly_summary['year'] = monthly_summary['order_month'].dt.year
-    monthly_summary['month'] = monthly_summary['order_month'].dt.month
+combined['quarter'] = combined['month'].apply(get_quarter)
 
-    pivot_orders = monthly_summary.pivot(index='month', columns='year', values='total_orders')
-    pivot_revenue = monthly_summary.pivot(index='month', columns='year', values='total_revenue')
+# Sidebar filters
+st.sidebar.header("Filter")
+year_filter = st.sidebar.multiselect("Tahun", [2017, 2018], default=None)
+quarter_filter = st.sidebar.multiselect("Kuartal", ["Q1", "Q2", "Q3", "Q4"], default=None)
+all_states = sorted(combined['customer_state_full'].dropna().unique())
+selected_states = st.sidebar.multiselect("Provinsi", all_states, default=None)
+product_categories = sorted(combined['product_category_name_english'].dropna().unique())
+selected_categories = st.sidebar.multiselect("Kategori Produk", product_categories, default=None)
 
-    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    x = range(1, 13)
+year = year_filter if year_filter else combined['year'].unique().tolist()
+quarter = quarter_filter if quarter_filter else ['Q1', 'Q2', 'Q3', 'Q4']
+states = selected_states if selected_states else combined['customer_state_full'].unique().tolist()
+categories = selected_categories if selected_categories else combined['product_category_name_english'].unique().tolist()
+
+combined_filtered = combined[
+    (combined['year'].isin(year)) &
+    (combined['quarter'].isin(quarter)) &
+    (combined['customer_state_full'].isin(states)) &
+    (combined['product_category_name_english'].isin(categories))
+]
+
+payments_filtered = payments[payments['order_id'].isin(combined_filtered['order_id'].unique())]
+
+visual = st.radio("Pilih Visualisasi", ["Pendapatan Bulanan", "Metode Pembayaran", "Peta RFM per State"])
+
+if visual == "Pendapatan Bulanan":
+    st.subheader("Visualisasi 1: Total Pendapatan per Bulan")
+
+    monthly_revenue = combined_filtered.groupby(['year', 'month']).agg({'total_price': 'sum'}).reset_index()
+    pivot_revenue = monthly_revenue.pivot(index='month', columns='year', values='total_price').fillna(0)
+
+    months_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    available_months = pivot_revenue.index.tolist()
+    month_names = [months_labels[m-1] for m in available_months]
     width = 0.35
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    total_line_2017 = pivot_revenue[2017] if 2017 in pivot_revenue.columns else None
+    total_line_2018 = pivot_revenue[2018] if 2018 in pivot_revenue.columns else None
 
-    orders_2017 = (pivot_orders[2017] / 1000).round(2)
-    orders_2018 = (pivot_orders[2018] / 1000).round(2)
+    if (total_line_2017 is None or total_line_2017.sum() == 0) and (total_line_2018 is None or total_line_2018.sum() == 0):
+        st.warning("Data tidak tersedia untuk kombinasi filter yang dipilih.")
+    else:
+        fig, ax = plt.subplots(figsize=(15,7))
 
-    bars_2017 = ax1.bar([i - width/2 for i in x], orders_2017, width=width, label='2017', color='#add8e6')
-    bars_2018 = ax1.bar([i + width/2 for i in x], orders_2018, width=width, label='2018', color='#4682b4')
-    ax1.set_ylabel('Jumlah Pesanan (x1000)')
-    ax1.set_title('Jumlah Pesanan per Bulan (2017–2018)')
-    ax1.legend()
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(months)
+        if total_line_2017 is not None:
+            ax.bar(np.array(available_months) - width/2, total_line_2017, width=width, label='2017', color='#87CEFA')
+            ax.plot(available_months, total_line_2017, color='#4682B4', marker='o', linewidth=2, label='Trend 2017')
 
-    for bar in bars_2017:
-        ax1.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01, f'{bar.get_height():.1f}', ha='center')
-    for bar in bars_2018:
-        ax1.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01, f'{bar.get_height():.1f}', ha='center')
+        if total_line_2018 is not None:
+            ax.bar(np.array(available_months) + width/2, total_line_2018, width=width, label='2018', color='#1E90FF')
+            ax.plot(available_months, total_line_2018, color='#00008B', marker='o', linewidth=2, label='Trend 2018')
 
-    revenue_2017 = (pivot_revenue[2017] / 100000).round(2)
-    revenue_2018 = (pivot_revenue[2018] / 100000).round(2)
+        ax.set_xticks(available_months)
+        ax.set_xticklabels(month_names)
+        ax.set_xlabel('Bulan', fontsize=13)
+        ax.set_ylabel('Total Pendapatan (x$100,000)', fontsize=13)
+        ax.set_title('Total Pendapatan per Bulan dan Tren Pertumbuhan', fontsize=16)
 
-    bars_rev_2017 = ax2.bar([i - width/2 for i in x], revenue_2017, width=width, label='2017', color='#add8e6')
-    bars_rev_2018 = ax2.bar([i + width/2 for i in x], revenue_2018, width=width, label='2018', color='#4682b4')
-    ax2.set_ylabel('Pendapatan (x100.000 R$)')
-    ax2.set_title('Total Pendapatan per Bulan (2017–2018)')
-    ax2.legend()
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(months)
+        max_y = pivot_revenue.max().max() / 100000
+        if pd.notna(max_y):
+            max_y = int(np.ceil(max_y / 2) * 2)
+            ax.set_yticks(np.arange(0, (max_y + 2), 2) * 100000)
+            ax.set_yticklabels([str(i) for i in range(0, (max_y + 2), 2)])
 
-    for bar in bars_rev_2017:
-        ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01, f'{bar.get_height():.1f}', ha='center')
-    for bar in bars_rev_2018:
-        ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01, f'{bar.get_height():.1f}', ha='center')
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        ax.legend()
 
-    plt.tight_layout()
-    st.pyplot(fig)
+        plt.tight_layout()
+        st.pyplot(fig)
 
-# --- PERTANYAAN 2 ---
-elif option == "Pertanyaan 2: Metode Pembayaran":
-    payment_summary = payments_df.groupby('payment_type').agg({
-        'order_id': 'count',
-        'payment_value': 'sum'
-    }).reset_index().rename(columns={
-        'order_id': 'total_transactions',
-        'payment_value': 'total_payment'
-    })
-    payment_summary = payment_summary.sort_values(by='total_payment', ascending=False)
+elif visual == "Metode Pembayaran":
+    st.subheader("Visualisasi 2: Frekuensi Penggunaan Metode Pembayaran")
+
+    # Gabungkan informasi dari combined_filtered ke payments_filtered
+    payments_joined = payments_filtered.merge(
+        combined_filtered[['order_id', 'year', 'quarter', 'customer_state_full', 'product_category_name_english']],
+        on='order_id',
+        how='inner'
+    )
+
+    # Ambil pasangan unik (order_id, payment_type)
+    payment_unique = payments_joined[['order_id', 'payment_type']].drop_duplicates()
+
+    # Hitung jumlah penggunaan tiap metode pembayaran
+    payment_counts = payment_unique['payment_type'].value_counts().reset_index()
+    payment_counts.columns = ['payment_type', 'count']
+
+    # Plot bar chart horizontal
+    if payment_counts.empty:
+        st.warning("Data tidak tersedia untuk kombinasi filter yang dipilih.")
+    else:
+        fig, ax = plt.subplots(figsize=(10,6))
+        ax.barh(payment_counts['payment_type'], payment_counts['count'], color='#1E90FF')
+        ax.set_xlabel('Jumlah Pengguna', fontsize=13)
+        ax.set_ylabel('Tipe Pembayaran', fontsize=13)
+        ax.set_title('Frekuensi Metode Pembayaran Berdasarkan Unik Order', fontsize=16)
+        ax.grid(axis='x', linestyle='--', alpha=0.7)
+
+        for i in range(len(payment_counts)):
+            ax.text(payment_counts['count'][i] + 5, i, payment_counts['count'][i], va='center', fontsize=10)
+
+        plt.tight_layout()
+        st.pyplot(fig)
+
+elif visual == "Peta RFM per State":
+    st.subheader("Visualisasi 3: Peta RFM Berdasarkan Provinsi")
+    def_date = combined['order_purchase_timestamp'].max()
+    rfm_metric = st.radio("Pilih Metrik yang Ditampilkan", ["Recency", "Frequency", "Monetary"])
+    recency_date = st.date_input(f"Tanggal Acuan untuk {rfm_metric}", def_date)
+    
+
+    rfm_df = combined_filtered.copy()
+
+    # Hitung Recency
+    recency_data = rfm_df.groupby('customer_state')['order_purchase_timestamp'].max().reset_index()
+    recency_data.rename(columns={'customer_state': 'state_code'}, inplace=True)
+    recency_data['Recency'] = (pd.to_datetime(recency_date) - recency_data['order_purchase_timestamp']).dt.days.clip(lower=0)
+
+    # Hitung Frequency
+    frequency_data = rfm_df.groupby('customer_state')['order_id'].nunique().reset_index()
+    frequency_data.columns = ['state_code', 'Frequency']
+
+    # Hitung Monetary
+    monetary_data = rfm_df.groupby('customer_state')['total_price'].sum().reset_index()
+    monetary_data.columns = ['state_code', 'Monetary']
+
+    # Gabungkan semua ke satu tabel
+    rfm_state = recency_data.merge(frequency_data, on='state_code').merge(monetary_data, on='state_code')
+    rfm_state['customer_state_full'] = rfm_state['state_code'].map(state_mapping)
 
 
-    fig, ax = plt.subplots(1, 2, figsize=(16, 6))
+    # Konversi ke format geo choropleth
+    def format_hover(row):
+        if rfm_metric == "Recency":
+            return f"<b>{row['customer_state_full']}</b><br>{row['Recency']} hari sejak pembelian terakhir"
+        elif rfm_metric == "Frequency":
+            return f"<b>{row['customer_state_full']}</b><br>{row['Frequency']} x pembelian"
+        else:
+            return f"<b>{row['customer_state_full']}</b><br>${row['Monetary']:,.0f} total pembelian"
 
-    ax[0].bar(payment_summary['payment_type'],
-              (payment_summary['total_transactions'] / 10000).round(2), color='#4682b4')
-    ax[0].set_title("Jumlah Transaksi (x10.000)")
-    ax[0].set_ylabel("Transaksi")
-    for bar in ax[0].containers[0]:
-        height = bar.get_height()
-        ax[0].text(bar.get_x() + bar.get_width()/2., height + 0.1, f'{height:.2f}', ha='center')
+    rfm_state['hover_text'] = rfm_state.apply(format_hover, axis=1)
 
-    ax[1].bar(payment_summary['payment_type'],
-              (payment_summary['total_payment'] / 1000000).round(2), color='#5dade2')
-    ax[1].set_title("Total Pembayaran (x1.000.000 R$)")
-    ax[1].set_ylabel("Total")
-    for bar in ax[1].containers[0]:
-        height = bar.get_height()
-        ax[1].text(bar.get_x() + bar.get_width()/2., height + 0.1, f'{height:.2f}', ha='center')
+    color_col = rfm_metric
+    reverse_color = True if rfm_metric == "Recency" else False
 
-    st.pyplot(fig)
+    fig = px.choropleth(
+        rfm_state,
+        geojson=brazil_geojson,
+        locations="state_code",
+        featureidkey="properties.sigla",
+        color=color_col,
+        color_continuous_scale='Blues',
+        hover_name="customer_state_full",
+        custom_data=["hover_text"]
+    )
 
-# --- PERTANYAAN 3 ---
-elif option == "Pertanyaan 3: RFM per Kota/Provinsi":
-    st.subheader("Analisis RFM Berdasarkan Kota & Provinsi")
-    latest_date = orders_df['order_purchase_timestamp'].max()
+    fig.update_traces(
+        hovertemplate='%{customdata[0]}<extra></extra>',
+        marker_line_width=0.5
+    )
 
-    rfm_by_location = orders_df.groupby(['customer_city', 'customer_state']).agg({
-        'order_purchase_timestamp': lambda x: int((latest_date - x.max()).total_seconds() / 86400),
-        'order_id': 'nunique',
-        'total_revenue': 'sum'
-    }).reset_index()
+    fig.update_geos(fitbounds="locations", visible=False)
 
-    rfm_by_location.columns = ['city', 'state', 'Recency', 'Frequency', 'Monetary']
-    rfm_by_location['location'] = rfm_by_location['city'] + ', ' + rfm_by_location['state']
+    fig.update_layout(
+        title_text=f"Peta {rfm_metric} Berdasarkan Provinsi",
+        geo=dict(showframe=False, showcoastlines=False)
+    )
 
-    top_rfm = st.selectbox("Pilih Metode RFM:", ["Recency", "Frequency", "Monetary"])
-    rfm_top = rfm_by_location.sort_values(
-        by=top_rfm if top_rfm != "Recency" else "Recency",
-        ascending=(top_rfm == "Recency")
-    ).head(10)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.barh(rfm_top['location'], rfm_top[top_rfm], color='#4682b4')
-    ax.invert_yaxis()
-    ax.set_title(f"Top 10 {top_rfm} Berdasarkan Lokasi")
-    ax.set_xlabel(top_rfm)
-    ax.set_xlim(left=0, right=rfm_top[top_rfm].max() + 5)
-
-    for i, v in enumerate(rfm_top[top_rfm]):
-        label = f'{v:.2f}' if top_rfm == "Monetary" else f'{int(v)}'
-        ax.text(v + 0.5, i, label, va='center')
-
-    st.pyplot(fig)
-
-    # Tambahkan catatan jika Recency dipilih
-    if top_rfm == "Recency":
-        st.caption("💡 *Catatan: Nilai Recency '0' menunjukkan pelanggan di kota tersebut melakukan transaksi terakhirnya pada hari yang sama dengan tanggal referensi (paling baru).*")
-
+    st.plotly_chart(fig, use_container_width=True)
