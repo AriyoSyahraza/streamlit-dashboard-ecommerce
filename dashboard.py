@@ -157,28 +157,31 @@ elif visual == "Peta RFM per State":
     st.subheader("Visualisasi 3: Peta RFM Berdasarkan Provinsi")
     def_date = combined['order_purchase_timestamp'].max()
     rfm_metric = st.radio("Pilih Metrik yang Ditampilkan", ["Recency", "Frequency", "Monetary"])
-    recency_date = st.date_input(f"Tanggal Acuan untuk {rfm_metric}", def_date)
-    
+    recency_date = st.date_input(f"Tanggal Acuan untuk {rfm_metric}", def_date, max_value=def_date)
 
     rfm_df = combined_filtered.copy()
+    # Filter transaksi yang terjadi hingga tanggal acuan
+    rfm_df_cut = rfm_df[rfm_df['order_purchase_timestamp'] <= pd.to_datetime(recency_date)]
 
-    # Hitung Recency
+    # Hitung Recency (tetap menggunakan semua data karena recency dihitung dari transaksi terakhir)
     recency_data = rfm_df.groupby('customer_state')['order_purchase_timestamp'].max().reset_index()
     recency_data.rename(columns={'customer_state': 'state_code'}, inplace=True)
     recency_data['Recency'] = (pd.to_datetime(recency_date) - recency_data['order_purchase_timestamp']).dt.days.clip(lower=0)
 
-    # Hitung Frequency
-    frequency_data = rfm_df.groupby('customer_state')['order_id'].nunique().reset_index()
+    # Hitung Frequency dari data yang sudah difilter
+    frequency_data = rfm_df_cut.groupby('customer_state')['order_id'].nunique().reset_index()
     frequency_data.columns = ['state_code', 'Frequency']
 
-    # Hitung Monetary
-    monetary_data = rfm_df.groupby('customer_state')['total_price'].sum().reset_index()
+    # Hitung Monetary dari data yang sudah difilter
+    monetary_data = rfm_df_cut.groupby('customer_state')['total_price'].sum().reset_index()
     monetary_data.columns = ['state_code', 'Monetary']
 
     # Gabungkan semua ke satu tabel
-    rfm_state = recency_data.merge(frequency_data, on='state_code').merge(monetary_data, on='state_code')
+    rfm_state = recency_data.merge(frequency_data, on='state_code', how='left').merge(monetary_data, on='state_code', how='left')
     rfm_state['customer_state_full'] = rfm_state['state_code'].map(state_mapping)
 
+    # Isi NaN dengan 0 jika ada provinsi yang tidak punya data Frequency/Monetary
+    rfm_state[['Frequency', 'Monetary']] = rfm_state[['Frequency', 'Monetary']].fillna(0)
 
     # Konversi ke format geo choropleth
     def format_hover(row):
